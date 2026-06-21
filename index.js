@@ -63,7 +63,7 @@ async function run() {
     // ---- Featured/Trending Prompts API (Limit to 6) [রিকোয়ারমেন্ট অনুযায়ী] ----
     app.get('/featured-prompts', async (req, res) => {
       try {
-        // শুধুমাত্র approved এবং public প্রম্পটগুলো ফিল্টার করে সর্বোচ্চ ৬টি নিয়ে আসা
+        // শুধুমাত্র approved এবং public প্রম্পটগুলো ফিল্টার করে সর্বোচ্চ６টি নিয়ে আসা
         const query = { status: "approved", visibility: "Public" };
         const result = await promptsCollection.find(query).limit(6).toArray(); // MongoDB limit(6)
         res.send(result);
@@ -137,6 +137,33 @@ async function run() {
 
       } catch (error) {
         res.status(500).send({ message: "Error fetching prompts", error });
+      }
+    });
+
+    // ---- Add New Prompt API ----
+    app.post('/add-prompt', async (req, res) => {
+      try {
+        const promptData = req.body;
+        
+        // রিকোয়ারমেন্ট অনুযায়ী নতুন প্রম্পটের প্রাথমিক ডেটা স্ট্রাকচার নির্ধারণ
+        const newPrompt = {
+          title: promptData.title,
+          description: promptData.description,
+          category: promptData.category,
+          aiTool: promptData.aiTool,
+          priceType: promptData.priceType,
+          price: promptData.priceType === 'Free' ? 0 : parseFloat(promptData.price), // Number-এ রূপান্তর
+          visibility: promptData.visibility,
+          creatorEmail: promptData.creatorEmail,
+          creatorName: promptData.creatorName,
+          status: 'pending', // ডিফল্ট স্ট্যাটাস পেন্ডিং থাকবে
+          createdAt: new Date()
+        };
+
+        const result = await promptsCollection.insertOne(newPrompt);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to add prompt", error });
       }
     });
 
