@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken'); 
 require('dotenv').config();
-const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb'); // ObjectId এখানে একবারে ইম্পোর্ট করা হলো
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb'); 
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -129,24 +129,14 @@ app.get('/all-prompts', async (req, res) => {
       ];
     }
 
-    if (category) {
-      query.category = category;
-    }
-
-    if (aiTool) {
-      query.aiTool = aiTool;
-    }
+    if (category) { query.category = category; }
+    if (aiTool) { query.aiTool = aiTool; }
 
     let sortOptions = {};
-    if (sort === 'newest') {
-      sortOptions = { _id: -1 };
-    } else if (sort === 'price-low') {
-      sortOptions = { price: 1 };
-    } else if (sort === 'price-high') {
-      sortOptions = { price: -1 };
-    } else {
-      sortOptions = { _id: -1 }; 
-    }
+    if (sort === 'newest') { sortOptions = { _id: -1 }; } 
+    else if (sort === 'price-low') { sortOptions = { price: 1 }; } 
+    else if (sort === 'price-high') { sortOptions = { price: -1 }; } 
+    else { sortOptions = { _id: -1 }; }
 
     const prompts = await promptsCollection.find(query)
       .sort(sortOptions)
@@ -233,6 +223,51 @@ app.get('/my-prompts', async (req, res) => {
     res.send(result || []);
   } catch (error) {
     res.status(500).send({ message: "Error fetching user prompts", error: error.message });
+  }
+});
+
+// ---- Delete a Prompt API ----
+app.delete('/prompt/:id', async (req, res) => {
+  try {
+    if (!promptsCollection) {
+      return res.status(500).send({ message: "Database not ready yet" });
+    }
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const result = await promptsCollection.deleteOne(query);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to delete prompt", error: error.message });
+  }
+});
+
+// ---- Update/Edit a Prompt API ----
+app.put('/prompt/:id', async (req, res) => {
+  try {
+    if (!promptsCollection) {
+      return res.status(500).send({ message: "Database not ready yet" });
+    }
+    const id = req.params.id;
+    const filter = { _id: new ObjectId(id) };
+    const updatedData = req.body;
+    
+    const updateDoc = {
+      $set: {
+        title: updatedData.title,
+        description: updatedData.description,
+        category: updatedData.category,
+        aiTool: updatedData.aiTool,
+        priceType: updatedData.priceType,
+        price: updatedData.priceType === 'Free' ? 0 : parseFloat(updatedData.price) || 0,
+        visibility: updatedData.visibility,
+        status: 'pending' // এডিট করার পর স্ট্যাটাস আবার pending-এ যাবে
+      },
+    };
+
+    const result = await promptsCollection.updateOne(filter, updateDoc);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to update prompt", error: error.message });
   }
 });
 
