@@ -8,8 +8,14 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors());
+// Middleware কনফিগারেশন (Vercel ও CORS ফ্রেন্ডলি)
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    // আপনার ফ্রন্টএন্ড Vercel-এ ডিপ্লয় করার পর সেই লাইভ লিংকটি এখানে কমা দিয়ে যুক্ত করবেন
+  ],
+  credentials: true
+}));
 app.use(express.json());
 
 // MongoDB Connection
@@ -28,6 +34,7 @@ let promptsCollection;
 
 async function run() {
   try {
+    // Vercel বা সার্ভারলেস এনভায়রনমেন্টের জন্য কানেকশন অপ্টিমাইজেশন
     await client.connect();
     
     const db = client.db("aiPromptDB");
@@ -41,7 +48,60 @@ async function run() {
 }
 run().catch(console.dir);
 
-// ---- Authentication API (JWT Generation) ----
+// =========================================================================
+// 🔒 AUTHENTICATION & ROLE-BASED ACCESS CONTROL MIDDLEWARES (রিকোয়ারমেন্ট ১)
+// =========================================================================
+
+// ১. JWT টোকেন ভেরিফিকেশন মিডলওয়্যার (প্রাইভেট রুটের সুরক্ষার জন্য)
+const verifyToken = (req, res, next) => {
+  if (!req.headers.authorization) {
+    return res.status(401).send({ message: 'Unauthorized access' });
+  }
+  const token = req.headers.authorization.split(' ')[1];
+  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ message: 'Unauthorized access' });
+    }
+    req.decoded = decoded;
+    next();
+  });
+};
+
+// ২. অ্যাডমিন ভেরিফিকেশন মিডলওয়্যার
+const verifyAdmin = async (req, res, next) => {
+  const email = req.decoded?.email;
+  if (!email) {
+    return res.status(403).send({ message: 'Forbidden access' });
+  }
+  const query = { email: email };
+  const user = await usersCollection.findOne(query);
+  const isAdmin = user?.role === 'Admin';
+  if (!isAdmin) {
+    return res.status(403).send({ message: 'Forbidden access' });
+  }
+  next();
+};
+
+// ৩. ক্রিয়েটর ভেরিফিকেশন মিডলওয়্যার (অ্যাডমিন বা ক্রিয়েটর উভয়েই অ্যাক্সেস পাবে)
+const verifyCreator = async (req, res, next) => {
+  const email = req.decoded?.email;
+  if (!email) {
+    return res.status(403).send({ message: 'Forbidden access' });
+  }
+  const query = { email: email };
+  const user = await usersCollection.findOne(query);
+  const isCreator = user?.role === 'Creator' || user?.role === 'Admin';
+  if (!isCreator) {
+    return res.status(403).send({ message: 'Forbidden access' });
+  }
+  next();
+};
+
+// =========================================================================
+// 🔑 AUTHENTICATION & USER APIs
+// =========================================================================
+
+// JWT টোকেন জেনারেট করা
 app.post('/jwt', async (req, res) => {
   try {
     const user = req.body; 
@@ -55,7 +115,7 @@ app.post('/jwt', async (req, res) => {
   }
 });
 
-// ---- User Registration / Save User to DB ----
+// ইউজার সেভ করা (গুগল বা সাধারণ রেজিস্ট্রেশন - ডিফল্ট রোল 'User' নিশ্চিত করা) [cite: 49]
 app.post('/users', async (req, res) => {
   try {
     const user = req.body;
@@ -76,8 +136,8 @@ app.post('/users', async (req, res) => {
       name: user.name || "Anonymous",
       email: user.email,
       photoURL: user.photoURL || "",
-      role: 'User', 
-      status: 'Free', 
+      role: 'User', // রিকোয়ারমেন্ট অনুযায়ী ডিফল্ট রোল 'User' [cite: 49]
+      status: 'Free', // ডিফল্ট সাবস্ক্রিপশন স্ট্যাটাস [cite: 198, 221]
       createdAt: new Date()
     };
 
@@ -88,7 +148,26 @@ app.post('/users', async (req, res) => {
   }
 });
 
-// ---- Featured/Trending Prompts API (Limit to 6) ----
+// ইউজারের রোল চেক করার এপিআই (ফ্রন্টএন্ডে রুট প্রটেক্ট করার জন্য দরকার)
+app.get('/users/role/:email', verifyToken, async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (email !== req.decoded.email) {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+    const query = { email: email };
+    const user = await usersCollection.findOne(query);
+    res.send({ role: user?.role || 'User' });
+  } catch (error) {
+    res.status(500).send({ message: "Error fetching user role", error: error.message });
+  }
+});
+
+// =========================================================================
+// 📝 PROMPTS APIs
+// =========================================================================
+
+// ট্রেন্ডিং বা ফিচার্ড প্রম্পট (হোম পেজের জন্য - লিমিট ৬) [cite: 77]
 app.get('/featured-prompts', async (req, res) => {
   try {
     if (!promptsCollection) {
@@ -102,7 +181,7 @@ app.get('/featured-prompts', async (req, res) => {
   }
 });
 
-// ---- All Prompts API (Search, Filter, Sort, and Pagination) ----
+// সব প্রম্পট এপিআই (সার্চ, ফিল্টার, সর্ট, এবং পেজিনেশন ব্যাকএন্ড থেকে হ্যান্ডেল করা) [cite: 174, 183]
 app.get('/all-prompts', async (req, res) => {
   try {
     if (!promptsCollection) {
@@ -118,6 +197,7 @@ app.get('/all-prompts', async (req, res) => {
     const aiTool = req.query.aiTool || '';
     const sort = req.query.sort || '';
 
+    // শুধুমাত্র approved এবং Public প্রম্পট মার্কেটপ্লেসে দেখাবে [cite: 110, 151, 196]
     let query = { status: "approved", visibility: "Public" };
 
     if (search) {
@@ -158,8 +238,8 @@ app.get('/all-prompts', async (req, res) => {
   }
 });
 
-// ---- Get Single Prompt Details API ----
-app.get('/prompt/:id', async (req, res) => {
+// একক প্রম্পটের ডিটেইলস (লগইন করা ইউজারদের জন্য প্রাইভেট রুট) [cite: 81, 95]
+app.get('/prompt/:id', verifyToken, async (req, res) => {
   try {
     if (!promptsCollection) {
       return res.status(500).send({ message: "Database not ready yet" });
@@ -177,8 +257,8 @@ app.get('/prompt/:id', async (req, res) => {
   }
 });
 
-// ---- Add New Prompt API ----
-app.post('/add-prompt', async (req, res) => {
+// নতুন প্রম্পট যোগ করা (স্ট্যাটাস ডিফল্ট 'pending' থাকবে) [cite: 195, 196]
+app.post('/add-prompt', verifyToken, async (req, res) => {
   try {
     if (!promptsCollection) {
       return res.status(500).send({ message: "Database not ready yet" });
@@ -196,7 +276,7 @@ app.post('/add-prompt', async (req, res) => {
       visibility: promptData.visibility,
       creatorEmail: promptData.creatorEmail,
       creatorName: promptData.creatorName,
-      status: 'pending', 
+      status: 'pending', // রিকোয়ারমেন্ট অনুযায়ী অবশই pending থাকবে [cite: 195]
       createdAt: new Date()
     };
 
@@ -207,8 +287,8 @@ app.post('/add-prompt', async (req, res) => {
   }
 });
 
-// ---- Get Specific User's Prompts API ----
-app.get('/my-prompts', async (req, res) => {
+// নির্দিষ্ট ইউজারের নিজের তৈরি প্রম্পট দেখার এপিআই [cite: 200, 255]
+app.get('/my-prompts', verifyToken, async (req, res) => {
   try {
     if (!promptsCollection) {
       return res.status(500).send({ message: "Database not ready yet" });
@@ -218,6 +298,12 @@ app.get('/my-prompts', async (req, res) => {
     if (!email) {
       return res.status(400).send({ message: "Email parameter is required" });
     }
+    
+    // সিকিউরিটি চেক: অন্য কেউ যেন টোকেন ছাড়া ডেটা না পায়
+    if (email !== req.decoded.email) {
+      return res.status(403).send({ message: "Forbidden access" });
+    }
+
     const query = { creatorEmail: email };
     const result = await promptsCollection.find(query).sort({ _id: -1 }).toArray();
     res.send(result || []);
@@ -226,8 +312,8 @@ app.get('/my-prompts', async (req, res) => {
   }
 });
 
-// ---- Delete a Prompt API ----
-app.delete('/prompt/:id', async (req, res) => {
+// প্রম্পট ডিলিট করা [cite: 203, 255]
+app.delete('/prompt/:id', verifyToken, async (req, res) => {
   try {
     if (!promptsCollection) {
       return res.status(500).send({ message: "Database not ready yet" });
@@ -241,8 +327,8 @@ app.delete('/prompt/:id', async (req, res) => {
   }
 });
 
-// ---- Update/Edit a Prompt API ----
-app.put('/prompt/:id', async (req, res) => {
+// প্রম্পট আপডেট/এডিট করা [cite: 202, 255]
+app.put('/prompt/:id', verifyToken, async (req, res) => {
   try {
     if (!promptsCollection) {
       return res.status(500).send({ message: "Database not ready yet" });
@@ -260,7 +346,7 @@ app.put('/prompt/:id', async (req, res) => {
         priceType: updatedData.priceType,
         price: updatedData.priceType === 'Free' ? 0 : parseFloat(updatedData.price) || 0,
         visibility: updatedData.visibility,
-        status: 'pending' // এডিট করার পর স্ট্যাটাস আবার pending-এ যাবে
+        status: 'pending' // এডিট করার পর সিকিউরিটির জন্য আবার pending হবে [cite: 196]
       },
     };
 
@@ -271,6 +357,7 @@ app.put('/prompt/:id', async (req, res) => {
   }
 });
 
+// Base Route
 app.get('/', (req, res) => {
   res.send('AI Prompt Marketplace Server is Running...');
 });
