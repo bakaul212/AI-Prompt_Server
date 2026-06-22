@@ -1,9 +1,9 @@
 // server/index.js
 const express = require('express');
 const cors = require('cors');
-const jwt = require('jsonwebtoken'); // জেসন ওয়েব টোকেন ইমপোর্ট করা হলো
+const jwt = require('jsonwebtoken'); 
 require('dotenv').config();
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb'); // ObjectId এখানে একবারে ইম্পোর্ট করা হলো
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -12,7 +12,7 @@ const port = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// MongoDB Connection (আপনার প্রকৃত ক্লাস্টার ইউআরএল cluster0.d4nhymd সহ আপডেট করা হয়েছে)
+// MongoDB Connection
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.d4nhymd.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
 const client = new MongoClient(uri, {
@@ -23,13 +23,11 @@ const client = new MongoClient(uri, {
   }
 });
 
-// কালেকশন ভ্যারিয়েবলগুলো গ্লোবাল স্কোপে ডিক্লেয়ার করা হলো
 let usersCollection;
 let promptsCollection;
 
 async function run() {
   try {
-    // ডাটাবেজ কানেক্ট করা হলো
     await client.connect();
     
     const db = client.db("aiPromptDB");
@@ -64,25 +62,22 @@ app.post('/users', async (req, res) => {
     if (!user || !user.email) {
       return res.status(400).send({ message: "Email is required" });
     }
-    
     if (!usersCollection) {
       return res.status(500).send({ message: "Database not ready yet" });
     }
     
-    // ইউজার অলরেডি ডাটাবেজে আছে কিনা চেক করা
     const query = { email: user.email };
     const existingUser = await usersCollection.findOne(query);
     if (existingUser) {
       return res.send({ message: 'user already exists', insertedId: null });
     }
 
-    // নতুন ইউজারের ডিফল্ট রোল হবে 'User' [রিকোয়ারমেন্ট অনুযায়ী]
     const newUser = {
       name: user.name || "Anonymous",
       email: user.email,
       photoURL: user.photoURL || "",
-      role: 'User', // Default Role
-      status: 'Free', // Free/Premium
+      role: 'User', 
+      status: 'Free', 
       createdAt: new Date()
     };
 
@@ -99,7 +94,6 @@ app.get('/featured-prompts', async (req, res) => {
     if (!promptsCollection) {
       return res.send([]);
     }
-    // শুধুমাত্র approved এবং public প্রম্পটগুলো ফিল্টার করে সর্বোচ্চ ৬টি নিয়ে আসা
     const query = { status: "approved", visibility: "Public" };
     const result = await promptsCollection.find(query).limit(6).toArray(); 
     res.send(result || []);
@@ -171,6 +165,25 @@ app.get('/all-prompts', async (req, res) => {
 
   } catch (error) {
     res.status(500).send({ message: "Error fetching prompts", error: error.message });
+  }
+});
+
+// ---- Get Single Prompt Details API ----
+app.get('/prompt/:id', async (req, res) => {
+  try {
+    if (!promptsCollection) {
+      return res.status(500).send({ message: "Database not ready yet" });
+    }
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const result = await promptsCollection.findOne(query); 
+    
+    if (!result) {
+      return res.status(404).send({ message: "Prompt not found" });
+    }
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Error fetching prompt details", error: error.message });
   }
 });
 
