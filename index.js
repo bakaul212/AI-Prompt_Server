@@ -11,7 +11,6 @@ const port = process.env.PORT || 5000;
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    // আপনার ফ্রন্টএন্ড Vercel-এ ডিপ্লয় করার পর সেই লাইভ লিংকটি এখানে কমা দিয়ে যুক্ত করবেন
   ],
   credentials: true
 }));
@@ -28,17 +27,18 @@ const client = new MongoClient(uri, {
   }
 });
 
-let usersCollection;
-let promptsCollection;
+let usersCollection, promptsCollection, bookmarksCollection, reviewsCollection, reportsCollection;
 
 async function run() {
   try {
-    // Vercel বা সার্ভারলেস এনভায়রনমেন্টের জন্য কানেকশন অপ্টিমাইজেশন
     await client.connect();
     
     const db = client.db("aiPromptDB");
     usersCollection = db.collection("users");
     promptsCollection = db.collection("prompts"); 
+    bookmarksCollection = db.collection("bookmarks");
+    reviewsCollection = db.collection("reviews");
+    reportsCollection = db.collection("reports");
 
     console.log("Successfully connected to MongoDB via PromptForge Engine!");
   } catch (err) {
@@ -51,7 +51,6 @@ run().catch(console.dir);
 // 🔒 AUTHENTICATION & ROLE-BASED ACCESS CONTROL MIDDLEWARES
 // =========================================================================
 
-// ১. JWT টোকেন ভেরিফিকেশন মিডলওয়্যার
 const verifyToken = (req, res, next) => {
   if (!req.headers.authorization) {
     return res.status(401).send({ message: 'Unauthorized access' });
@@ -66,55 +65,14 @@ const verifyToken = (req, res, next) => {
   });
 };
 
-// ২. অ্যাডমিন ভেরিফিকেশন মিডলওয়্যার (try-catch সহ সুরক্ষিত)
-const verifyAdmin = async (req, res, next) => {
-  try {
-    const email = req.decoded?.email;
-    if (!email) {
-      return res.status(403).send({ message: 'Forbidden access' });
-    }
-    const query = { email: email };
-    const user = await usersCollection.findOne(query);
-    const isAdmin = user?.role === 'Admin';
-    if (!isAdmin) {
-      return res.status(403).send({ message: 'Forbidden access' });
-    }
-    next();
-  } catch (error) {
-    res.status(500).send({ message: "Internal Middleware Error" });
-  }
-};
-
-// ৩. ক্রিয়েটর ভেরিফিকেশন মিডলওয়্যার
-const verifyCreator = async (req, res, next) => {
-  try {
-    const email = req.decoded?.email;
-    if (!email) {
-      return res.status(403).send({ message: 'Forbidden access' });
-    }
-    const query = { email: email };
-    const user = await usersCollection.findOne(query);
-    const isCreator = user?.role === 'Creator' || user?.role === 'Admin';
-    if (!isCreator) {
-      return res.status(403).send({ message: 'Forbidden access' });
-    }
-    next();
-  } catch (error) {
-    res.status(500).send({ message: "Internal Middleware Error" });
-  }
-};
-
 // =========================================================================
 // 🔑 AUTHENTICATION & USER APIs
 // =========================================================================
 
-// JWT টোকেন জেনারেট করা
 app.post('/jwt', async (req, res) => {
   try {
     const user = req.body; 
-    if (!user || !user.email) {
-      return res.status(400).send({ message: "Valid user data is required" });
-    }
+    if (!user || !user.email) return res.status(400).send({ message: "Valid user data is required" });
     const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: '7d' });
     res.send({ token });
   } catch (error) {
@@ -122,30 +80,22 @@ app.post('/jwt', async (req, res) => {
   }
 });
 
-// ইউজার সেভ করা (ইউনিক স্কিমা ভ্যালুসহ ও প্লেজারিজম ফ্রী ডিফল্ট রোল 'User')
 app.post('/users', async (req, res) => {
   try {
     const user = req.body;
-    if (!user || !user.email) {
-      return res.status(400).send({ message: "Email is required" });
-    }
-    if (!usersCollection) {
-      return res.status(500).send({ message: "Database not ready yet" });
-    }
+    if (!user || !user.email) return res.status(400).send({ message: "Email is required" });
     
     const query = { email: user.email };
     const existingUser = await usersCollection.findOne(query);
-    if (existingUser) {
-      return res.send({ message: 'User already exists', insertedId: null });
-    }
+    if (existingUser) return res.send({ message: 'User already exists', insertedId: null });
 
     const newUser = {
       name: user.name || "Anonymous Forge User",
       email: user.email,
       photoURL: user.photoURL || "",
-      role: 'User',        // রিকোয়ারমেন্ট অনুযায়ী ডিফল্ট রোল 'User' 
-      status: 'Free',      // ডিফল্ট সাবস্ক্রিপশন স্ট্যাটাস
-      tier: 'Standard',    // ডেমো থেকে ইউনিক আইডেন্টিটি তৈরি করার এক্সট্রা ফিল্ড
+      role: 'User',        
+      status: 'Free',      
+      tier: 'Standard',    
       createdAt: new Date()
     };
 
@@ -156,13 +106,10 @@ app.post('/users', async (req, res) => {
   }
 });
 
-// ইউজারের রোল চেক করার এপিআই
 app.get('/users/role/:email', verifyToken, async (req, res) => {
   try {
     const email = req.params.email;
-    if (email !== req.decoded.email) {
-      return res.status(403).send({ message: 'Forbidden access' });
-    }
+    if (email !== req.decoded.email) return res.status(403).send({ message: 'Forbidden access' });
     const query = { email: email };
     const user = await usersCollection.findOne(query);
     res.send({ role: user?.role || 'User' });
@@ -172,33 +119,21 @@ app.get('/users/role/:email', verifyToken, async (req, res) => {
 });
 
 // =========================================================================
-// 📝 PROMPTS APIs
+// 📝 CORE MARKETPLACE & PROMPTS APIs
 // =========================================================================
 
-// হোম পেজের জন্য ফিচার্ড প্রম্পট এপিআই (সর্বোচ্চ ৬টি অনুমোদিত পাবলিক প্রম্পট)
 app.get('/featured-prompts', async (req, res) => {
   try {
-    if (!promptsCollection) {
-      return res.status(500).send({ message: "Database not ready yet" });
-    }
-    const query = { status: "approved", visibility: "Public" };
-    const featured = await promptsCollection.find(query)
-      .sort({ _id: -1 }) 
-      .limit(6)          
-      .toArray();
+    const featured = await promptsCollection.find({ status: "approved", visibility: "Public" })
+      .sort({ _id: -1 }).limit(6).toArray();
     res.send(featured || []);
   } catch (error) {
-    res.status(500).send({ message: "Error fetching featured prompts", error: error.message });
+    res.status(500).send({ message: "Error", error: error.message });
   }
 });
 
-// সব প্রম্পট এপিআই (সার্চ, ফিল্টার, সর্ট, এবং পেজিনেশন)
 app.get('/all-prompts', async (req, res) => {
   try {
-    if (!promptsCollection) {
-      return res.status(500).send({ message: "Database not ready yet" });
-    }
-
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 6; 
     const skip = (page - 1) * limit;
@@ -220,151 +155,123 @@ app.get('/all-prompts', async (req, res) => {
       });
     }
 
-    if (category) { conditions.push({ category: category }); }
-    if (aiTool) { conditions.push({ aiTool: aiTool }); }
-    if (conditions.length > 0) { query.$and = conditions; }
+    if (category) conditions.push({ category });
+    if (aiTool) conditions.push({ aiTool });
+    if (conditions.length > 0) query.$and = conditions;
 
     let sortOptions = {};
-    if (sort === 'newest') { sortOptions = { _id: -1 }; } 
-    else if (sort === 'price-low') { sortOptions = { price: 1 }; } 
-    else if (sort === 'price-high') { sortOptions = { price: -1 }; } 
-    else { sortOptions = { _id: -1 }; }
+    if (sort === 'newest') sortOptions = { _id: -1 };
+    else if (sort === 'price-low') sortOptions = { price: 1 };
+    else if (sort === 'price-high') sortOptions = { price: -1 };
+    else sortOptions = { _id: -1 };
 
-    const prompts = await promptsCollection.find(query)
-      .sort(sortOptions)
-      .skip(skip)
-      .limit(limit)
-      .toArray();
-
+    const prompts = await promptsCollection.find(query).sort(sortOptions).skip(skip).limit(limit).toArray();
     const totalCount = await promptsCollection.countDocuments(query) || 0;
 
-    res.send({
-      prompts: prompts || [],
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
-      currentPage: page
-    });
+    res.send({ prompts, totalCount, totalPages: Math.ceil(totalCount / limit), currentPage: page });
   } catch (error) {
     res.status(500).send({ message: "Error fetching prompts", error: error.message });
   }
 });
 
-// একক প্রম্পটের ডিটেইলস (প্রাইভেট রুট)
+// =========================================================================
+// 🚀 DYNAMIC INTERACTION & PREMIUM ACCESS CONTROL APIs (আপডেটেড ও কমপ্লিট)
+// =========================================================================
+
 app.get('/prompt/:id', verifyToken, async (req, res) => {
   try {
-    if (!promptsCollection) {
-      return res.status(500).send({ message: "Database not ready yet" });
-    }
     const id = req.params.id;
-    const query = { _id: new ObjectId(id) };
-    const result = await promptsCollection.findOne(query); 
+    const userEmail = req.query.email; 
     
-    if (!result) {
-      return res.status(404).send({ message: "Prompt not found" });
-    }
-    res.send(result);
+    if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid ID specification" });
+
+    const prompt = await promptsCollection.findOne({ _id: new ObjectId(id) });
+    if (!prompt) return res.status(404).send({ message: "Prompt core untraceable" });
+
+    const user = await usersCollection.findOne({ email: userEmail });
+    const isPremiumUser = user?.status === 'Premium' || user?.role === 'Admin';
+
+    const isBookmarked = await bookmarksCollection.findOne({ promptId: id, userEmail }) ? true : false;
+    const reviews = await reviewsCollection.find({ promptId: id }).sort({ createdAt: -1 }).toArray();
+
+    res.send({ prompt, isPremiumUser, isBookmarked, reviews });
   } catch (error) {
-    res.status(500).send({ message: "Error fetching prompt details", error: error.message });
+    res.status(500).send({ message: "Data extraction error", error: error.message });
   }
 });
 
-// নতুন প্রম্পট যোগ করা (স্ট্যাটাস ডিফল্ট 'pending' থাকবে)
-app.post('/add-prompt', verifyToken, async (req, res) => {
+app.post('/prompt/bookmark', verifyToken, async (req, res) => {
   try {
-    if (!promptsCollection) {
-      return res.status(500).send({ message: "Database not ready yet" });
+    const { promptId, userEmail } = req.body;
+    if (req.decoded.email !== userEmail) return res.status(403).send({ message: "Access forbidden" });
+
+    const existingBookmark = await bookmarksCollection.findOne({ promptId, userEmail });
+
+    if (existingBookmark) {
+      await bookmarksCollection.deleteOne({ promptId, userEmail });
+      return res.send({ action: 'removed', message: 'Bookmark successfully de-indexed.' });
+    } else {
+      await bookmarksCollection.insertOne({ promptId, userEmail, createdAt: new Date() });
+      return res.send({ action: 'added', message: 'Prompt securely bookmarked.' });
     }
-    const promptData = req.body;
-    const newPrompt = {
-      title: promptData.title,
-      description: promptData.description,
-      category: promptData.category,
-      aiTool: promptData.aiTool,
-      priceType: promptData.priceType,
-      price: promptData.priceType === 'Free' ? 0 : parseFloat(promptData.price) || 0, 
-      visibility: promptData.visibility,
-      creatorEmail: promptData.creatorEmail,
-      creatorName: promptData.creatorName,
-      status: 'pending', 
+  } catch (error) {
+    res.status(500).send({ message: "Bookmark pipeline failure", error: error.message });
+  }
+});
+
+app.patch('/prompt/copy-count/:id', verifyToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const result = await promptsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $inc: { copyCount: 1 } }
+    );
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Counter execution failed", error: error.message });
+  }
+});
+
+app.post('/prompt/review', verifyToken, async (req, res) => {
+  try {
+    const { promptId, name, email, rating, comment } = req.body;
+    if (req.decoded.email !== email) return res.status(403).send({ message: "Access forbidden" });
+
+    const newReview = {
+      promptId, name, email,
+      rating: parseInt(rating),
+      comment, createdAt: new Date()
+    };
+
+    await reviewsCollection.insertOne(newReview);
+    res.send({ success: true });
+  } catch (error) {
+    res.status(500).send({ message: "Review logging aborted" });
+  }
+});
+
+app.post('/prompt/report', verifyToken, async (req, res) => {
+  try {
+    const { promptId, userEmail, reason, description } = req.body;
+    if (req.decoded.email !== userEmail) return res.status(403).send({ message: "Access forbidden" });
+
+    const reportPayload = {
+      promptId, userEmail, reason,
+      description: description || "No elaboration provided",
       createdAt: new Date()
     };
-    const result = await promptsCollection.insertOne(newPrompt);
-    res.send(result);
+
+    await reportsCollection.insertOne(reportPayload);
+    res.send({ success: true });
   } catch (error) {
-    res.status(500).send({ message: "Failed to add prompt", error: error.message });
+    res.status(500).send({ message: "Incident reports indexing failed" });
   }
 });
 
-// নির্দিষ্ট ইউজারের নিজের তৈরি প্রম্পট
-app.get('/my-prompts', verifyToken, async (req, res) => {
-  try {
-    if (!promptsCollection) {
-      return res.status(500).send({ message: "Database not ready yet" });
-    }
-    const email = req.query.email;
-    if (!email) {
-      return res.status(400).send({ message: "Email parameter is required" });
-    }
-    if (email !== req.decoded.email) {
-      return res.status(403).send({ message: "Forbidden access" });
-    }
-    const query = { creatorEmail: email };
-    const result = await promptsCollection.find(query).sort({ _id: -1 }).toArray();
-    res.send(result || []);
-  } catch (error) {
-    res.status(500).send({ message: "Error fetching user prompts", error: error.message });
-  }
-});
-
-// প্রম্পট ডিলিট করা
-app.delete('/prompt/:id', verifyToken, async (req, res) => {
-  try {
-    if (!promptsCollection) {
-      return res.status(500).send({ message: "Database not ready yet" });
-    }
-    const id = req.params.id;
-    const query = { _id: new ObjectId(id) };
-    const result = await promptsCollection.deleteOne(query);
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ message: "Failed to delete prompt", error: error.message });
-  }
-});
-
-// প্রম্পট আপডেট/এডিট করা
-app.put('/prompt/:id', verifyToken, async (req, res) => {
-  try {
-    if (!promptsCollection) {
-      return res.status(500).send({ message: "Database not ready yet" });
-    }
-    const id = req.params.id;
-    const filter = { _id: new ObjectId(id) };
-    const updatedData = req.body;
-    
-    const updateDoc = {
-      $set: {
-        title: updatedData.title,
-        description: updatedData.description,
-        category: updatedData.category,
-        aiTool: updatedData.aiTool,
-        priceType: updatedData.priceType,
-        price: updatedData.priceType === 'Free' ? 0 : parseFloat(updatedData.price) || 0,
-        visibility: updatedData.visibility,
-        status: 'pending' 
-      },
-    };
-    const result = await promptsCollection.updateOne(filter, updateDoc);
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ message: "Failed to update prompt", error: error.message });
-  }
-});
-
-// Base Route
 app.get('/', (req, res) => {
-  res.send('PromptForge Engine Middleware Server is Running...');
+  res.send('PromptForge Engine Backend Server is Running...');
 });
 
 app.listen(port, () => {
-  console.log(`Server is running securely on port ${port}`);
+  console.log(`Server running safely on port ${port}`);
 });
