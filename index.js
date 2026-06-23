@@ -4,6 +4,9 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb'); 
 
+// স্ট্রাইপ সিক্রেট কী ইনিশিয়ালাইজেশন
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -14,7 +17,9 @@ app.use(cors({
   ],
   credentials: true
 }));
-app.use(express.json());
+// পুরোনো app.use(express.json()); এর পরিবর্তে এই দুটি লাইন বসিয়ে দিন
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // MongoDB Connection
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.d4nhymd.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
@@ -27,7 +32,7 @@ const client = new MongoClient(uri, {
   }
 });
 
-let usersCollection, promptsCollection, bookmarksCollection, reviewsCollection, reportsCollection;
+let usersCollection, promptsCollection, bookmarksCollection, reviewsCollection, reportsCollection, paymentsCollection;
 
 async function run() {
   try {
@@ -39,6 +44,7 @@ async function run() {
     bookmarksCollection = db.collection("bookmarks");
     reviewsCollection = db.collection("reviews");
     reportsCollection = db.collection("reports");
+    paymentsCollection = db.collection("payments"); // পেমেন্ট কালেকশন ইন্টিগ্রেশন
 
     console.log("Successfully connected to MongoDB via PromptForge Engine!");
   } catch (err) {
@@ -173,9 +179,74 @@ app.get('/all-prompts', async (req, res) => {
     res.status(500).send({ message: "Error fetching prompts", error: error.message });
   }
 });
+// =========================================================================
+// 🌐 MARKETPLACE ADVANCED SERVER-SIDE FILTERING API
+// =========================================================================
+
+app.get('/marketplace-prompts', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 6; 
+    const skip = (page - 1) * limit;
+
+    const { search, category, aiTool, difficulty, sort } = req.query;
+
+    // ডিফল্ট কুয়েরি: শুধুমাত্র এপ্রুভড এবং পাবলিক প্রম্পট দেখাবে
+    let query = { status: "approved", visibility: "Public" };
+    let conditions = [];
+
+    // ১. টাইটেল এবং ট্যাগস এর উপর ভিত্তি করে কাস্টম সার্চ লজিক
+    if (search) {
+      conditions.push({
+        $or: [
+          { title: { $regex: search, $options: 'i' } },
+          { tags: { $regex: search, $options: 'i' } },
+          { aiTool: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+
+    // ২. ফিল্টার কন্ডিশনস ইন্টিগ্রেশন
+    if (category) conditions.push({ category: category });
+    if (aiTool) conditions.push({ aiTool: aiTool });
+    if (difficulty) conditions.push({ difficulty: difficulty });
+
+    if (conditions.length > 0) {
+      query.$and = conditions;
+    }
+
+    // ৩. সর্টিং অ্যালগরিদম কনফিগারেশন
+    let sortOptions = {};
+    if (sort === 'popular') {
+      sortOptions = { rating: -1 }; // সর্বোচ্চ রেটিং অনুযায়ী
+    } else if (sort === 'copied') {
+      sortOptions = { copyCount: -1 }; // সর্বোচ্চ কপি অনুযায়ী
+    } else {
+      sortOptions = { _id: -1 }; // নতুন আপলোড ফাইল সবার আগে (Latest)
+    }
+
+    // ডাটাবেজ এক্সেকিউশন
+    const prompts = await promptsCollection.find(query)
+      .sort(sortOptions)
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+
+    const totalCount = await promptsCollection.countDocuments(query) || 0;
+
+    res.send({
+      prompts,
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      currentPage: page
+    });
+  } catch (error) {
+    res.status(500).send({ message: "Marketplace index system failure", error: error.message });
+  }
+});
 
 // =========================================================================
-// 🚀 DYNAMIC INTERACTION & PREMIUM ACCESS CONTROL APIs (আপডেটেড ও কমপ্লিট)
+// 🚀 DYNAMIC INTERACTION & PREMIUM ACCESS CONTROL APIs
 // =========================================================================
 
 app.get('/prompt/:id', verifyToken, async (req, res) => {
@@ -267,6 +338,180 @@ app.post('/prompt/report', verifyToken, async (req, res) => {
     res.status(500).send({ message: "Incident reports indexing failed" });
   }
 });
+
+// =========================================================================
+// 💳 STRIPE PAYMENT APIs
+// =========================================================================
+
+// ১. পেমেন্ট ইনটেন্ট তৈরি করা (Client Secret জেনারেট করা)
+app.post('/create-payment-intent', verifyToken, async (req, res) => {
+  try {
+    const { price } = req.body;
+    if (!price || price !== 5) {
+      return res.status(400).send({ message: "Invalid subscription amount node." });
+    }
+
+    // সেন্ট-এ কনভার্ট করা ($5 = 500 cents)
+    const amount = parseInt(price * 100);
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amount,
+      currency: 'usd',
+      payment_method_types: ['card']
+    });
+
+    res.send({
+      clientSecret: paymentIntent.client_secret
+    });
+  } catch (error) {
+    res.status(500).send({ message: "Payment pipeline encryption failed", error: error.message });
+  }
+});
+
+// ২. সফল পেমেন্ট লেজার এবং ইউজার স্ট্যাটাস আপডেট এপিআই
+app.post('/payment-success', verifyToken, async (req, res) => {
+  try {
+    const paymentInfo = req.body;
+    if (req.decoded.email !== paymentInfo.email) {
+      return res.status(403).send({ message: "Forbidden access ledger breach." });
+    }
+
+    // ক) পেমেন্ট হিস্ট্রি ডাটাবেজে সেভ করা
+    const paymentResult = await paymentsCollection.insertOne({
+      transactionId: paymentInfo.transactionId,
+      email: paymentInfo.email,
+      amount: paymentInfo.amount,
+      date: new Date(),
+      status: 'success'
+    });
+
+    // খ) ইউজারের সাবস্ক্রিপশন স্ট্যাটাস 'Premium' এ রূপান্তর করা
+    const userFilter = { email: paymentInfo.email };
+    const updatedDoc = {
+      $set: {
+        status: 'Premium',
+        tier: 'VIP Forge Architect'
+      }
+    };
+    const userResult = await usersCollection.updateOne(userFilter, updatedDoc);
+
+    res.send({ success: true, paymentResult, userResult });
+  } catch (error) {
+    res.status(500).send({ message: "Database update failed post-transaction", error: error.message });
+  }
+});
+
+// =========================================================================
+// 🎛️ USER DASHBOARD CORE APIs
+// =========================================================================
+
+// ১. নতুন প্রম্পট যোগ করা (ফ্রি ইউজার লিমিট ৩ চেক সহ)
+app.post('/add-prompt', verifyToken, async (req, res) => {
+  try {
+    const promptData = req.body;
+    if (req.decoded.email !== promptData.creatorEmail) {
+      return res.status(403).send({ message: "Forbidden pipeline breach." });
+    }
+
+    // ইউজারের কারেন্ট স্ট্যাটাস চেক করা (Free নাকি Premium)
+    const user = await usersCollection.findOne({ email: promptData.creatorEmail });
+    
+    if (user?.status !== 'Premium' && user?.role !== 'Admin') {
+      // ফ্রি ইউজার হলে অলরেডি কয়টা প্রম্পট আপলোড করেছে তা চেক করা
+      const uploadedCount = await promptsCollection.countDocuments({ creatorEmail: promptData.creatorEmail });
+      if (uploadedCount >= 3) {
+        return res.status(403).send({ 
+          limitReached: true, 
+          message: "Free tier threshold reached. Max 3 prompts allowed. Upgrade to Premium matrix." 
+        });
+      }
+    }
+
+    // প্রম্পট অবজেক্ট ডাটাবেজে ইনসার্ট করা
+    const result = await promptsCollection.insertOne({
+      ...promptData,
+      copyCount: 0,
+      status: 'pending', // অ্যাডমিন অ্যাপ্রুভালের জন্য ওয়েট করবে
+      createdAt: new Date()
+    });
+
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to deploy prompt construct", error: error.message });
+  }
+});
+
+// ২. ড্যাশবোর্ডের প্রোফাইল অ্যানালিটিক্স ও সামারি ডেটা আনা
+app.get('/user-summary/:email', verifyToken, async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (req.decoded.email !== email) return res.status(403).send({ message: "Forbidden" });
+
+    const totalPrompts = await promptsCollection.countDocuments({ creatorEmail: email });
+    res.send({ totalPrompts });
+  } catch (error) {
+    res.status(500).send({ message: "Error compiling sync logs" });
+  }
+});
+
+// ৩. কারেন্ট ইউজারের তৈরি করা প্রম্পট লিস্ট (My Prompts)
+app.get('/my-prompts/:email', verifyToken, async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (req.decoded.email !== email) return res.status(403).send({ message: "Forbidden" });
+
+    const result = await promptsCollection.find({ creatorEmail: email }).sort({ _id: -1 }).toArray();
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Error fetching user archive" });
+  }
+});
+
+// ৪. প্রম্পট ডিলিট করা
+app.delete('/prompt-delete/:id', verifyToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const result = await promptsCollection.deleteOne({ _id: new ObjectId(id) });
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Deletion command aborted" });
+  }
+});
+
+// ৫. ইউজারের সেভ করা/বুকমার্কড প্রম্পট লিস্ট
+app.get('/my-bookmarks/:email', verifyToken, async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (req.decoded.email !== email) return res.status(403).send({ message: "Forbidden" });
+
+    // প্রথমে বুকমার্ক টেবিল থেকে প্রম্পট আইডিগুলো নেওয়া
+    const bookmarks = await bookmarksCollection.find({ userEmail: email }).toArray();
+    const promptIds = bookmarks.map(b => new ObjectId(b.promptId));
+
+    // আইডিগুলো দিয়ে মেইন প্রম্পট কালেকশন থেকে ডেটা খুঁজে বের করা
+    const savedPrompts = await promptsCollection.find({ _id: { $in: promptIds } }).toArray();
+    res.send(savedPrompts);
+  } catch (error) {
+    res.status(500).send({ message: "Error fetching saved terminal metrics" });
+  }
+});
+
+// ৬. ইউজারের দেওয়া রিভিউ লিস্ট (My Reviews)
+app.get('/my-reviews/:email', verifyToken, async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (req.decoded.email !== email) return res.status(403).send({ message: "Forbidden" });
+
+    const result = await reviewsCollection.find({ email: email }).sort({ createdAt: -1 }).toArray();
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Review log query failed" });
+  }
+});
+
+// =========================================================================
+// 🌐 BASE & LISTENER CONNECTIONS
+// =========================================================================
 
 app.get('/', (req, res) => {
   res.send('PromptForge Engine Backend Server is Running...');
