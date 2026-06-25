@@ -509,6 +509,266 @@ app.get('/my-reviews/:email', verifyToken, async (req, res) => {
   }
 });
 
+// ==========================================
+// REAL ADMIN DASHBOARD SUBSYSTEM ENDPOINTS
+// ==========================================
+
+
+// ===================================================
+// 🔐 CHALLENGE MIDDLEWARES (JWT & ADMIN VERIFICATION)
+// ===================================================
+
+// ১. JWT ভেরিফাই মিডলওয়্যার
+const verifyJWT = (req, res, next) => {
+  const authorization = req.headers.authorization;
+  if (!authorization) {
+    return res.status(401).send({ error: true, message: 'Unauthorized Access Matrix' });
+  }
+  
+  const token = authorization.split(' ')[1];
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(403).send({ error: true, message: 'Forbidden Access Matrix' });
+    }
+    req.decoded = decoded;
+    next();
+  });
+};
+
+// ২. অ্যাডমিন ভেরিফাই মিডলওয়্যার (ডাটাবেজ থেকে রোল চেক করবে)
+const verifyAdmin = async (req, res, next) => {
+  const email = req.decoded.email;
+  const query = { email: email };
+  const user = await usersCollection.findOne(query);
+  if (user?.role !== 'admin') {
+    return res.status(403).send({ error: true, message: 'Forbidden Command Level' });
+  }
+  next();
+};
+
+// ===================================================
+// ⚡ JWT GENERATOR ROUTE (লগইনের সময় টোকেন ইস্যু করার জন্য)
+// ===================================================
+app.post('/jwt', async (req, res) => {
+  const user = req.body;
+  const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
+  res.send({ token });
+});
+
+// ===================================================
+// 🛡️ COMBINED SECURE ADMIN SUB-SYSTEM (100% REAL DATA)
+// ===================================================
+
+// ==========================================
+// 📊 ADMIN API ROUTES (No Duplicate Middlewares)
+// ==========================================
+
+// ১. অ্যানালিটিক্স ডাটা জেনারেশন
+app.get('/admin/analytics', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const totalUsers = await usersCollection.countDocuments();
+    const totalPrompts = await promptsCollection.countDocuments();
+    const totalReviews = await reviewsCollection.countDocuments();
+
+    const copyResult = await promptsCollection.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalCopies: { $sum: { $ifNull: ["$copyCount", 0] } }
+        }
+      }
+    ]).toArray();
+
+    const totalCopies = copyResult[0]?.totalCopies || 0;
+
+    res.send({ totalUsers, totalPrompts, totalReviews, totalCopies });
+  } catch (error) {
+    res.status(500).send({ message: "Analytics generation failed", error });
+  }
+});
+
+// ২. অল ইউজার লিস্ট (With Backend Pagination)
+app.get('/admin/users', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const size = parseInt(req.query.size) || 5;
+    const skip = (page - 1) * size;
+
+    const result = await usersCollection.find().skip(skip).limit(size).toArray();
+    const total = await usersCollection.countDocuments();
+
+    res.send({ result, total });
+  } catch (error) {
+    res.status(500).send({ message: "Failed to fetch users" });
+  }
+});
+
+// ৩. ইউজারের রোল পরিবর্তন (PATCH Action - Secure)
+app.patch('/admin/user-role/:id', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { role } = req.body;
+    const filter = { _id: new ObjectId(id) };
+    const updatedDoc = { $set: { role: role } };
+    const result = await usersCollection.updateOne(filter, updatedDoc);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to change role" });
+  }
+});
+
+// ৪. ইউজার ডিলিট করা (DELETE Action - Secure)
+app.delete('/admin/user-delete/:id', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const result = await usersCollection.deleteOne(query);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to delete user" });
+  }
+});
+
+// ৫. অল প্রম্পটস লিস্ট (With Backend Search, Filter, Sort & Pagination)
+app.get('/admin/prompts', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const size = parseInt(req.query.size) || 5;
+    const skip = (page - 1) * size;
+
+    const search = req.query.search || '';
+    const statusFilter = req.query.status || '';
+    const sortOrder = req.query.sort === 'asc' ? 1 : -1;
+
+    let query = {
+      title: { $regex: search, $options: 'i' }
+    };
+
+    if (statusFilter) {
+      query.status = statusFilter;
+    }
+
+    const result = await promptsCollection.find(query)
+      .sort({ createdAt: sortOrder })
+      .skip(skip)
+      .limit(size)
+      .toArray();
+
+    const total = await promptsCollection.countDocuments(query);
+
+    res.send({ result, total });
+  } catch (error) {
+    res.status(500).send({ message: "Failed to fetch prompts" });
+  }
+});
+
+// ৬. প্রম্পট স্ট্যাটাস আপডেট - Approved/Rejected (PATCH Action - Secure)
+app.patch('/admin/prompt-status/:id', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { status, feedback } = req.body;
+    const filter = { _id: new ObjectId(id) };
+    const updatedDoc = {
+      $set: { 
+        status: status,
+        feedback: feedback || "" 
+      }
+    };
+    const result = await promptsCollection.updateOne(filter, updatedDoc);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to update prompt status" });
+  }
+});
+
+// ७. প্রম্পট ডিলিট করা (DELETE Action - Secure)
+app.delete('/admin/prompt-delete/:id', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { reportId } = req.query;
+    
+    const promptQuery = { _id: new ObjectId(id) };
+    const result = await promptsCollection.deleteOne(promptQuery);
+
+    if (reportId) {
+      await reportsCollection.deleteOne({ _id: new ObjectId(reportId) });
+    }
+
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to delete prompt" });
+  }
+});
+
+// ৮. অল পেমেন্টস হিস্ট্রি (With Backend Pagination - Secure)
+app.get('/admin/payments', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const size = parseInt(req.query.size) || 5;
+    const skip = (page - 1) * size;
+
+    const result = await paymentsCollection.find().skip(skip).limit(size).toArray();
+    const total = await paymentsCollection.countDocuments();
+
+    res.send({ result, total });
+  } catch (error) {
+    res.status(500).send({ message: "Failed to fetch payments" });
+  }
+});
+
+// ৯. অল রিপোর্টেড প্রম্পটস (With Backend Pagination - Secure)
+app.get('/admin/reported-prompts', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const size = parseInt(req.query.size) || 5;
+    const skip = (page - 1) * size;
+
+    const result = await reportsCollection.find().skip(skip).limit(size).toArray();
+    const total = await reportsCollection.countDocuments();
+
+    res.send({ result, total });
+  } catch (error) {
+    res.status(500).send({ message: "Failed to fetch reports" });
+  }
+});
+
+// ১০. রিপোর্ট ডিসমিস/বাতিল করা (PATCH/DELETE Action - Secure)
+app.patch('/admin/report-dismiss/:id', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const result = await reportsCollection.deleteOne(query);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to dismiss report" });
+  }
+});
+
+// ১১. ক্রিয়েটরকে ওয়ার্নিং পাঠানো (Secure)
+app.post('/admin/warn-creator', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const { email, message, reportId } = req.body;
+    
+    const notificationDoc = {
+      type: "Warning",
+      recipientEmail: email,
+      message: message,
+      createdAt: new Date(),
+      read: false
+    };
+    
+    const result = await db.collection('notifications').insertOne(notificationDoc);
+
+    if (reportId) {
+      await reportsCollection.deleteOne({ _id: new ObjectId(reportId) });
+    }
+
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to transmit warning" });
+  }
+});
+
 // =========================================================================
 // 🌐 BASE & LISTENER CONNECTIONS
 // =========================================================================
