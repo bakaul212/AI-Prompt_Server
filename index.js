@@ -462,10 +462,34 @@ app.get('/user-summary/:email', verifyToken, async (req, res) => {
     const email = req.params.email;
     if (req.decoded.email !== email) return res.status(403).send({ message: "Forbidden" });
 
+    // ১. এই ইউজারের নিজের তৈরি করা মোট প্রম্পট সংখ্যা
     const totalPrompts = await promptsCollection.countDocuments({ creatorEmail: email });
-    res.send({ totalPrompts });
+
+    // ২. এই ইউজারের নিজের করা মোট বুকমার্ক সংখ্যা
+    const totalBookmarks = await bookmarksCollection.countDocuments({ userEmail: email });
+
+    // ৩. এই ইউজারের প্রম্পটগুলো অন্য ইউজাররা মোট কতবার কপি করেছে তার যোগফল
+    const copyResult = await promptsCollection.aggregate([
+      { $match: { creatorEmail: email } }, // শুধুমাত্র এই ইউজারের প্রম্পট ফিল্টার করা হচ্ছে
+      {
+        $group: {
+          _id: null,
+          totalCopies: { $sum: { $ifNull: ["$copyCount", 0] } }
+        }
+      }
+    ]).toArray();
+
+    const totalCopies = copyResult[0]?.totalCopies || 0;
+
+    // ফ্রন্টএন্ড ড্যাশবোর্ডের জন্য ৩টি ডেটাই একসাথে অবজেক্ট আকারে পাঠানো হচ্ছে
+    res.send({ 
+      totalPrompts, 
+      totalBookmarks, 
+      totalCopies 
+    });
+
   } catch (error) {
-    res.status(500).send({ message: "Error compiling sync logs" });
+    res.status(500).send({ message: "Error compiling sync logs", error: error.message });
   }
 });
 
