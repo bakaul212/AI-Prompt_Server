@@ -1,10 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken'); 
-require('dotenv').config();
+require('dotenv').config(); // এটি অবশ্যই সবার উপরে থাকতে হবে যেন স্ট্রাইপ কী ঠিকঠাক পায়
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb'); 
 
-// স্ট্রাইপ সিক্রেট কী ইনিশিয়ালাইজেশন
+// স্ট্রাইপ সিক্রেট কী ইনিশিয়ালাইজেশন
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
@@ -17,12 +17,12 @@ app.use(cors({
   ],
   credentials: true
 }));
-// পুরোনো app.use(express.json()); এর পরিবর্তে এই দুটি লাইন বসিয়ে দিন
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// MongoDB Connection
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.d4nhymd.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+// MongoDB Connection (ডাটাবেজের সঠিক নামসহ)
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.d4nhymd.mongodb.net/aiPromptDB?retryWrites=true&w=majority&appName=Cluster0`;
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -32,19 +32,21 @@ const client = new MongoClient(uri, {
   }
 });
 
-let usersCollection, promptsCollection, bookmarksCollection, reviewsCollection, reportsCollection, paymentsCollection;
+// গ্লোবাল ভ্যারিয়েবল ডিক্লেয়ারেশন (db সহ যোগ করা হয়েছে)
+let db, usersCollection, promptsCollection, bookmarksCollection, reviewsCollection, reportsCollection, paymentsCollection, notificationsCollection;
 
 async function run() {
   try {
     await client.connect();
     
-    const db = client.db("aiPromptDB");
+    db = client.db("aiPromptDB");
     usersCollection = db.collection("users");
     promptsCollection = db.collection("prompts"); 
     bookmarksCollection = db.collection("bookmarks");
     reviewsCollection = db.collection("reviews");
     reportsCollection = db.collection("reports");
-    paymentsCollection = db.collection("payments"); // পেমেন্ট কালেকশন ইন্টিগ্রেশন
+    paymentsCollection = db.collection("payments"); 
+    notificationsCollection = db.collection("notifications"); // নোটিফিকেশন কালেকশন
 
     console.log("Successfully connected to MongoDB via PromptForge Engine!");
   } catch (err) {
@@ -54,21 +56,40 @@ async function run() {
 run().catch(console.dir);
 
 // =========================================================================
-// 🔒 AUTHENTICATION & ROLE-BASED ACCESS CONTROL MIDDLEWARES
+// 🔒 AUTHENTICATION & SECURITY MIDDLEWARE (কনসিস্টেন্ট করা হয়েছে)
 // =========================================================================
 
+// একটি স্ট্যান্ডার্ড ইউনিফাইড মিডলওয়্যার যা পুরো অ্যাপ্লিকেশনে কাজ করবে
 const verifyToken = (req, res, next) => {
   if (!req.headers.authorization) {
-    return res.status(401).send({ message: 'Unauthorized access' });
+    return res.status(401).send({ error: true, message: 'Unauthorized Access Matrix' });
   }
   const token = req.headers.authorization.split(' ')[1];
-  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+  
+  // আপনার ড্যাশবোর্ডে JWT_SECRET বা ACCESS_TOKEN_SECRET যেকোনো একটি কনসিস্টেন্টলি ব্যবহার করুন। 
+  // এখানে আপনার সুবিধার্থে ব্যাকআপ সহ হ্যান্ডেল করা হয়েছে।
+  const secret = process.env.JWT_SECRET || process.env.ACCESS_TOKEN_SECRET;
+  
+  jwt.verify(token, secret, (err, decoded) => {
     if (err) {
-      return res.status(401).send({ message: 'Unauthorized access' });
+      return res.status(403).send({ error: true, message: 'Forbidden Access Matrix' });
     }
     req.decoded = decoded;
     next();
   });
+};
+
+// অ্যাডমিন ভেরিফাই মিডলওয়্যার
+const verifyAdmin = async (req, res, next) => {
+  const email = req.decoded.email;
+  const query = { email: email };
+  const user = await usersCollection.findOne(query);
+  
+  // রোল চেক করা (কারো ডাটাবেজে ছোটহাতের 'admin' বা বড়হাতের 'Admin' থাকতে পারে, দুটিই চেক করা হলো)
+  if (user?.role?.toLowerCase() !== 'admin') {
+    return res.status(403).send({ error: true, message: 'Forbidden Command Level' });
+  }
+  next();
 };
 
 // =========================================================================
@@ -79,7 +100,9 @@ app.post('/jwt', async (req, res) => {
   try {
     const user = req.body; 
     if (!user || !user.email) return res.status(400).send({ message: "Valid user data is required" });
-    const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: '7d' });
+    
+    const secret = process.env.JWT_SECRET || process.env.ACCESS_TOKEN_SECRET;
+    const token = jwt.sign(user, secret, { expiresIn: '7d' });
     res.send({ token });
   } catch (error) {
     res.status(500).send({ message: "JWT Generation Failed", error: error.message });
@@ -179,9 +202,6 @@ app.get('/all-prompts', async (req, res) => {
     res.status(500).send({ message: "Error fetching prompts", error: error.message });
   }
 });
-// =========================================================================
-// 🌐 MARKETPLACE ADVANCED SERVER-SIDE FILTERING API
-// =========================================================================
 
 app.get('/marketplace-prompts', async (req, res) => {
   try {
@@ -191,11 +211,9 @@ app.get('/marketplace-prompts', async (req, res) => {
 
     const { search, category, aiTool, difficulty, sort } = req.query;
 
-    // ডিফল্ট কুয়েরি: শুধুমাত্র এপ্রুভড এবং পাবলিক প্রম্পট দেখাবে
     let query = { status: "approved", visibility: "Public" };
     let conditions = [];
 
-    // ১. টাইটেল এবং ট্যাগস এর উপর ভিত্তি করে কাস্টম সার্চ লজিক
     if (search) {
       conditions.push({
         $or: [
@@ -206,7 +224,6 @@ app.get('/marketplace-prompts', async (req, res) => {
       });
     }
 
-    // ২. ফিল্টার কন্ডিশনস ইন্টিগ্রেশন
     if (category) conditions.push({ category: category });
     if (aiTool) conditions.push({ aiTool: aiTool });
     if (difficulty) conditions.push({ difficulty: difficulty });
@@ -215,17 +232,15 @@ app.get('/marketplace-prompts', async (req, res) => {
       query.$and = conditions;
     }
 
-    // ৩. সর্টিং অ্যালগরিদম কনফিগারেশন
     let sortOptions = {};
     if (sort === 'popular') {
-      sortOptions = { rating: -1 }; // সর্বোচ্চ রেটিং অনুযায়ী
+      sortOptions = { rating: -1 };
     } else if (sort === 'copied') {
-      sortOptions = { copyCount: -1 }; // সর্বোচ্চ কপি অনুযায়ী
+      sortOptions = { copyCount: -1 };
     } else {
-      sortOptions = { _id: -1 }; // নতুন আপলোড ফাইল সবার আগে (Latest)
+      sortOptions = { _id: -1 };
     }
 
-    // ডাটাবেজ এক্সেকিউশন
     const prompts = await promptsCollection.find(query)
       .sort(sortOptions)
       .skip(skip)
@@ -260,7 +275,7 @@ app.get('/prompt/:id', verifyToken, async (req, res) => {
     if (!prompt) return res.status(404).send({ message: "Prompt core untraceable" });
 
     const user = await usersCollection.findOne({ email: userEmail });
-    const isPremiumUser = user?.status === 'Premium' || user?.role === 'Admin';
+    const isPremiumUser = user?.status === 'Premium' || user?.role?.toLowerCase() === 'admin';
 
     const isBookmarked = await bookmarksCollection.findOne({ promptId: id, userEmail }) ? true : false;
     const reviews = await reviewsCollection.find({ promptId: id }).sort({ createdAt: -1 }).toArray();
@@ -340,19 +355,19 @@ app.post('/prompt/report', verifyToken, async (req, res) => {
 });
 
 // =========================================================================
-// 💳 STRIPE PAYMENT APIs
+// 💳 STRIPE PAYMENT APIs (FIXED & FULLY RUNNING)
 // =========================================================================
 
 // ১. পেমেন্ট ইনটেন্ট তৈরি করা (Client Secret জেনারেট করা)
 app.post('/create-payment-intent', verifyToken, async (req, res) => {
   try {
     const { price } = req.body;
-    if (!price || price !== 5) {
+    if (!price || parseFloat(price) !== 5) {
       return res.status(400).send({ message: "Invalid subscription amount node." });
     }
 
     // সেন্ট-এ কনভার্ট করা ($5 = 500 cents)
-    const amount = parseInt(price * 100);
+    const amount = Math.round(parseFloat(price) * 100);
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amount,
@@ -405,7 +420,6 @@ app.post('/payment-success', verifyToken, async (req, res) => {
 // 🎛️ USER DASHBOARD CORE APIs
 // =========================================================================
 
-// ১. নতুন প্রম্পট যোগ করা (ফ্রি ইউজার লিমিট ৩ চেক সহ)
 app.post('/add-prompt', verifyToken, async (req, res) => {
   try {
     const promptData = req.body;
@@ -413,11 +427,9 @@ app.post('/add-prompt', verifyToken, async (req, res) => {
       return res.status(403).send({ message: "Forbidden pipeline breach." });
     }
 
-    // ইউজারের কারেন্ট স্ট্যাটাস চেক করা (Free নাকি Premium)
     const user = await usersCollection.findOne({ email: promptData.creatorEmail });
     
-    if (user?.status !== 'Premium' && user?.role !== 'Admin') {
-      // ফ্রি ইউজার হলে অলরেডি কয়টা প্রম্পট আপলোড করেছে তা চেক করা
+    if (user?.status !== 'Premium' && user?.role?.toLowerCase() !== 'admin') {
       const uploadedCount = await promptsCollection.countDocuments({ creatorEmail: promptData.creatorEmail });
       if (uploadedCount >= 3) {
         return res.status(403).send({ 
@@ -427,11 +439,10 @@ app.post('/add-prompt', verifyToken, async (req, res) => {
       }
     }
 
-    // প্রম্পট অবজেক্ট ডাটাবেজে ইনসার্ট করা
     const result = await promptsCollection.insertOne({
       ...promptData,
       copyCount: 0,
-      status: 'pending', // অ্যাডমিন অ্যাপ্রুভালের জন্য ওয়েট করবে
+      status: 'pending',
       createdAt: new Date()
     });
 
@@ -441,7 +452,6 @@ app.post('/add-prompt', verifyToken, async (req, res) => {
   }
 });
 
-// ২. ড্যাশবোর্ডের প্রোফাইল অ্যানালিটিক্স ও সামারি ডেটা আনা
 app.get('/user-summary/:email', verifyToken, async (req, res) => {
   try {
     const email = req.params.email;
@@ -454,7 +464,6 @@ app.get('/user-summary/:email', verifyToken, async (req, res) => {
   }
 });
 
-// ৩. কারেন্ট ইউজারের তৈরি করা প্রম্পট লিস্ট (My Prompts)
 app.get('/my-prompts/:email', verifyToken, async (req, res) => {
   try {
     const email = req.params.email;
@@ -467,7 +476,6 @@ app.get('/my-prompts/:email', verifyToken, async (req, res) => {
   }
 });
 
-// ৪. প্রম্পট ডিলিট করা
 app.delete('/prompt-delete/:id', verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
@@ -478,17 +486,14 @@ app.delete('/prompt-delete/:id', verifyToken, async (req, res) => {
   }
 });
 
-// ৫. ইউজারের সেভ করা/বুকমার্কড প্রম্পট লিস্ট
 app.get('/my-bookmarks/:email', verifyToken, async (req, res) => {
   try {
     const email = req.params.email;
     if (req.decoded.email !== email) return res.status(403).send({ message: "Forbidden" });
 
-    // প্রথমে বুকমার্ক টেবিল থেকে প্রম্পট আইডিগুলো নেওয়া
     const bookmarks = await bookmarksCollection.find({ userEmail: email }).toArray();
     const promptIds = bookmarks.map(b => new ObjectId(b.promptId));
 
-    // আইডিগুলো দিয়ে মেইন প্রম্পট কালেকশন থেকে ডেটা খুঁজে বের করা
     const savedPrompts = await promptsCollection.find({ _id: { $in: promptIds } }).toArray();
     res.send(savedPrompts);
   } catch (error) {
@@ -496,7 +501,6 @@ app.get('/my-bookmarks/:email', verifyToken, async (req, res) => {
   }
 });
 
-// ৬. ইউজারের দেওয়া রিভিউ লিস্ট (My Reviews)
 app.get('/my-reviews/:email', verifyToken, async (req, res) => {
   try {
     const email = req.params.email;
@@ -510,61 +514,11 @@ app.get('/my-reviews/:email', verifyToken, async (req, res) => {
 });
 
 // ==========================================
-// REAL ADMIN DASHBOARD SUBSYSTEM ENDPOINTS
-// ==========================================
-
-
-// ===================================================
-// 🔐 CHALLENGE MIDDLEWARES (JWT & ADMIN VERIFICATION)
-// ===================================================
-
-// ১. JWT ভেরিফাই মিডলওয়্যার
-const verifyJWT = (req, res, next) => {
-  const authorization = req.headers.authorization;
-  if (!authorization) {
-    return res.status(401).send({ error: true, message: 'Unauthorized Access Matrix' });
-  }
-  
-  const token = authorization.split(' ')[1];
-  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
-    if (err) {
-      return res.status(403).send({ error: true, message: 'Forbidden Access Matrix' });
-    }
-    req.decoded = decoded;
-    next();
-  });
-};
-
-// ২. অ্যাডমিন ভেরিফাই মিডলওয়্যার (ডাটাবেজ থেকে রোল চেক করবে)
-const verifyAdmin = async (req, res, next) => {
-  const email = req.decoded.email;
-  const query = { email: email };
-  const user = await usersCollection.findOne(query);
-  if (user?.role !== 'admin') {
-    return res.status(403).send({ error: true, message: 'Forbidden Command Level' });
-  }
-  next();
-};
-
-// ===================================================
-// ⚡ JWT GENERATOR ROUTE (লগইনের সময় টোকেন ইস্যু করার জন্য)
-// ===================================================
-app.post('/jwt', async (req, res) => {
-  const user = req.body;
-  const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
-  res.send({ token });
-});
-
-// ===================================================
-// 🛡️ COMBINED SECURE ADMIN SUB-SYSTEM (100% REAL DATA)
-// ===================================================
-
-// ==========================================
-// 📊 ADMIN API ROUTES (No Duplicate Middlewares)
+// 📊 REAL ADMIN DASHBOARD ENDPOINTS (verifyToken ও verifyAdmin যুক্ত)
 // ==========================================
 
 // ১. অ্যানালিটিক্স ডাটা জেনারেশন
-app.get('/admin/analytics', verifyJWT, verifyAdmin, async (req, res) => {
+app.get('/admin/analytics', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const totalUsers = await usersCollection.countDocuments();
     const totalPrompts = await promptsCollection.countDocuments();
@@ -587,8 +541,8 @@ app.get('/admin/analytics', verifyJWT, verifyAdmin, async (req, res) => {
   }
 });
 
-// ২. অল ইউজার লিস্ট (With Backend Pagination)
-app.get('/admin/users', verifyJWT, verifyAdmin, async (req, res) => {
+// ২. অল ইউজার লিস্ট
+app.get('/admin/users', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const size = parseInt(req.query.size) || 5;
@@ -603,8 +557,8 @@ app.get('/admin/users', verifyJWT, verifyAdmin, async (req, res) => {
   }
 });
 
-// ৩. ইউজারের রোল পরিবর্তন (PATCH Action - Secure)
-app.patch('/admin/user-role/:id', verifyJWT, verifyAdmin, async (req, res) => {
+// ৩. ইউজারের রোল পরিবর্তন
+app.patch('/admin/user-role/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const id = req.params.id;
     const { role } = req.body;
@@ -617,8 +571,8 @@ app.patch('/admin/user-role/:id', verifyJWT, verifyAdmin, async (req, res) => {
   }
 });
 
-// ৪. ইউজার ডিলিট করা (DELETE Action - Secure)
-app.delete('/admin/user-delete/:id', verifyJWT, verifyAdmin, async (req, res) => {
+// ৪. ইউজার ডিলিট করা
+app.delete('/admin/user-delete/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const id = req.params.id;
     const query = { _id: new ObjectId(id) };
@@ -629,8 +583,8 @@ app.delete('/admin/user-delete/:id', verifyJWT, verifyAdmin, async (req, res) =>
   }
 });
 
-// ৫. অল প্রম্পটস লিস্ট (With Backend Search, Filter, Sort & Pagination)
-app.get('/admin/prompts', verifyJWT, verifyAdmin, async (req, res) => {
+// ৫. অল প্রম্পটস লিস্ট
+app.get('/admin/prompts', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const size = parseInt(req.query.size) || 5;
@@ -662,8 +616,8 @@ app.get('/admin/prompts', verifyJWT, verifyAdmin, async (req, res) => {
   }
 });
 
-// ৬. প্রম্পট স্ট্যাটাস আপডেট - Approved/Rejected (PATCH Action - Secure)
-app.patch('/admin/prompt-status/:id', verifyJWT, verifyAdmin, async (req, res) => {
+// ৬. প্রম্পট স্ট্যাটাস আপডেট - Approved/Rejected
+app.patch('/admin/prompt-status/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const id = req.params.id;
     const { status, feedback } = req.body;
@@ -681,8 +635,8 @@ app.patch('/admin/prompt-status/:id', verifyJWT, verifyAdmin, async (req, res) =
   }
 });
 
-// ७. প্রম্পট ডিলিট করা (DELETE Action - Secure)
-app.delete('/admin/prompt-delete/:id', verifyJWT, verifyAdmin, async (req, res) => {
+// ৭. প্রম্পট ডিলিট করা (Admin)
+app.delete('/admin/prompt-delete/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const id = req.params.id;
     const { reportId } = req.query;
@@ -700,8 +654,8 @@ app.delete('/admin/prompt-delete/:id', verifyJWT, verifyAdmin, async (req, res) 
   }
 });
 
-// ৮. অল পেমেন্টস হিস্ট্রি (With Backend Pagination - Secure)
-app.get('/admin/payments', verifyJWT, verifyAdmin, async (req, res) => {
+// ৮. অল পেমেন্টস হিস্ট্রি
+app.get('/admin/payments', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const size = parseInt(req.query.size) || 5;
@@ -716,8 +670,8 @@ app.get('/admin/payments', verifyJWT, verifyAdmin, async (req, res) => {
   }
 });
 
-// ৯. অল রিপোর্টেড প্রম্পটস (With Backend Pagination - Secure)
-app.get('/admin/reported-prompts', verifyJWT, verifyAdmin, async (req, res) => {
+// ৯. অল রিপোর্টেড প্রম্পটস
+app.get('/admin/reported-prompts', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const size = parseInt(req.query.size) || 5;
@@ -732,8 +686,8 @@ app.get('/admin/reported-prompts', verifyJWT, verifyAdmin, async (req, res) => {
   }
 });
 
-// ১০. রিপোর্ট ডিসমিস/বাতিল করা (PATCH/DELETE Action - Secure)
-app.patch('/admin/report-dismiss/:id', verifyJWT, verifyAdmin, async (req, res) => {
+// ১০. রিপোর্ট ডিসমিস/বাতিল করা
+app.patch('/admin/report-dismiss/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const id = req.params.id;
     const query = { _id: new ObjectId(id) };
@@ -744,8 +698,8 @@ app.patch('/admin/report-dismiss/:id', verifyJWT, verifyAdmin, async (req, res) 
   }
 });
 
-// ১১. ক্রিয়েটরকে ওয়ার্নিং পাঠানো (Secure)
-app.post('/admin/warn-creator', verifyJWT, verifyAdmin, async (req, res) => {
+// ১১. ক্রিয়েটরকে ওয়ার্নিং পাঠানো (db কালেকশন বাগ ফিক্স করা হয়েছে)
+app.post('/admin/warn-creator', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { email, message, reportId } = req.body;
     
@@ -757,7 +711,7 @@ app.post('/admin/warn-creator', verifyJWT, verifyAdmin, async (req, res) => {
       read: false
     };
     
-    const result = await db.collection('notifications').insertOne(notificationDoc);
+    const result = await notificationsCollection.insertOne(notificationDoc);
 
     if (reportId) {
       await reportsCollection.deleteOne({ _id: new ObjectId(reportId) });
@@ -765,7 +719,7 @@ app.post('/admin/warn-creator', verifyJWT, verifyAdmin, async (req, res) => {
 
     res.send(result);
   } catch (error) {
-    res.status(500).send({ message: "Failed to transmit warning" });
+    res.status(500).send({ message: "Failed to transmit warning", error: error.message });
   }
 });
 
