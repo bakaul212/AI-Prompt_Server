@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken'); 
-require('dotenv').config(); // এটি অবশ্যই সবার উপরে থাকতে হবে যেন স্ট্রাইপ কী ঠিকঠাক পায়
+require('dotenv').config(); 
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb'); 
 
 // স্ট্রাইপ সিক্রেট কী ইনিশিয়ালাইজেশন
@@ -10,10 +10,11 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Middleware কনফিগারেশন (Vercel ও CORS ফ্রেন্ডলি)
+// Middleware কনফিগারেশন (CORS বাগ ফিক্সড - আপনার লাইভ ক্লায়েন্ট লিংক যোগ করা হয়েছে)
 app.use(cors({
   origin: [
     'http://localhost:3000',
+    'https://ai-prompt-client-woad.vercel.app' // আপনার লাইভ ফ্রন্টএন্ড লিংক
   ],
   credentials: true
 }));
@@ -21,7 +22,7 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// MongoDB Connection (ডাটাবেজের সঠিক নামসহ)
+// MongoDB Connection
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.d4nhymd.mongodb.net/aiPromptDB?retryWrites=true&w=majority&appName=Cluster0`;
 
 const client = new MongoClient(uri, {
@@ -32,28 +33,32 @@ const client = new MongoClient(uri, {
   }
 });
 
-// গ্লোবাল ভ্যারিয়েবল ডিক্লেয়ারেশন (db সহ যোগ করা হয়েছে)
-let db, usersCollection, promptsCollection, bookmarksCollection, reviewsCollection, reportsCollection, paymentsCollection, notificationsCollection;
-
-async function run() {
+// সার্ভারলেস ফ্রেন্ডলি কানেকশন মিডলওয়্যার (এটি প্রতি রিকোয়েস্টে ডাটাবেজ সচল রাখবে)
+const connectDB = async (req, res, next) => {
   try {
-    await client.connect();
-    
-    db = client.db("aiPromptDB");
-    usersCollection = db.collection("users");
-    promptsCollection = db.collection("prompts"); 
-    bookmarksCollection = db.collection("bookmarks");
-    reviewsCollection = db.collection("reviews");
-    reportsCollection = db.collection("reports");
-    paymentsCollection = db.collection("payments"); 
-    notificationsCollection = db.collection("notifications"); // নোটিফিকেশন কালেকশন
-
-    console.log("Successfully connected to MongoDB via PromptForge Engine!");
+    // যদি অলরেডি কানেক্টেড না থাকে, তবে কানেক্ট করবে
+    if (!client.topology || !client.topology.isConnected()) {
+      await client.connect();
+    }
+    const db = client.db("aiPromptDB");
+    global.usersCollection = db.collection("users");
+    global.promptsCollection = db.collection("prompts"); 
+    global.bookmarksCollection = db.collection("bookmarks");
+    global.reviewsCollection = db.collection("reviews");
+    global.reportsCollection = db.collection("reports");
+    global.paymentsCollection = db.collection("payments"); 
+    global.notificationsCollection = db.collection("notifications");
+    next();
   } catch (err) {
     console.error("MongoDB Connection Error: ", err);
+    res.status(500).send({ message: "Database connection failed", error: err.message });
   }
-}
-run().catch(console.dir);
+};
+
+// সব রিকোয়েস্টের জন্য ডাটাবেজ কানেকশন অ্যাক্টিভ করা
+app.use(connectDB);
+
+// পুরনো global ভ্যারিয়েবল ও run() ফাংশন ডিলিট করে দেওয়া হয়েছে যা ভেরসেলে বাগ তৈরি করছিল।
 
 // =========================================================================
 // 🔒 AUTHENTICATION & SECURITY MIDDLEWARE (কনসিস্টেন্ট করা হয়েছে)
